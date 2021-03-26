@@ -18,6 +18,7 @@ import random
 import time
 import os
 import sys
+import serial
 
 # JSON-HTTP RPC Configuration
 # This will be particular to your local ~/.bitcoin/bitcoin.conf
@@ -224,7 +225,6 @@ def tx_compute_hash(tx):
     Return:
         string: transaction hash as an ASCII hex string
     """
-
     return hashlib.sha256(hashlib.sha256(bytes.fromhex(tx)).digest()).digest()[::-1].hex()
 
 
@@ -366,8 +366,13 @@ def block_make_submit(block):
 # Block Miner
 ################################################################################
 
+def sb(serial_port, b):
+    serial_port.flushInput()
+    serial_port.write(b)
+    time.sleep(0.02)
+    return serial_port.read(1)
 
-def block_mine(block_template, coinbase_message, extranonce_start, address, timeout=None, debugnonce_start=False):
+def block_mine(block_template, coinbase_message, extranonce_start, address, serial_port, timeout=None, debugnonce_start=False):
     """
     Mine a block.
 
@@ -419,31 +424,54 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 
         # Loop through the nonce
         nonce = 0 if not debugnonce_start else debugnonce_start
-        while nonce <= 0xffffffff:
-            # Update the block header with the new 32-bit nonce
-            block_header = block_header[0:76] + nonce.to_bytes(4, byteorder='little')
 
-            # Recompute the block hash
-            block_hash = block_compute_raw_hash(block_header)
+        while True:
+            # Send block header
+            print("Sending block header...")
+            sb(serial_port, b"A")
+            for i in range(0, 76):
+                bh = bytes(block_header)
+                sb(serial_port, bh[i:i+1])
 
-            # Check if it the block meets the target hash
-            if block_hash < target_hash:
-                block_template['nonce'] = nonce
-                block_template['hash'] = block_hash.hex()
-                return (block_template, hash_rate)
+            print("Sending target value...")
+            sb(serial_port, b"B")
+            for i in range(32):
+                sb(serial_port, target_hash[i:i+1])
+            print("Game Boy mining now.")
 
-            # Measure hash rate and check timeout
-            if nonce > 0 and nonce % 1048576 == 0:
-                hash_rate = hash_rate + ((1048576 / (time.time() - time_stamp)) - hash_rate) / (hash_rate_count + 1)
-                hash_rate_count += 1
-
+            while True:
+                time.sleep(4)
+                serial_port.flushInput()
+                # serial_port.read()
+                status = sb(serial_port, b"D")
+                if status == b"\x63":
+                    print("Success!")
+                    result = bytearray()
+                    result += sb(serial_port, b"1")
+                    result += sb(serial_port, b"1")
+                    result += sb(serial_port, b"1")
+                    result += sb(serial_port, b"1")
+                    block_header = block_header[0:76] + result
+                    block_hash = block_compute_raw_hash(block_header)
+                    nonce = struct.unpack("<I", result)[0]
+                    block_template['nonce'] = nonce
+                    block_template['hash'] = block_hash.hex()
+                    time.sleep(0.5)
+                    return (block_template, hash_rate)
+                    break
+                    
                 time_stamp = time.time()
-
                 # If our mine time expired, return none
                 if timeout and (time_stamp - time_start) > timeout:
+                    print("Timeout!")
+                    time.sleep(1)
+                    sb(serial_port, b"C")
+                    time.sleep(1)
                     return (None, hash_rate)
 
-            nonce += 1
+
+
+        time.sleep(30)
         extranonce += 1
 
     # If we ran out of extra nonces, return none
@@ -455,13 +483,13 @@ def block_mine(block_template, coinbase_message, extranonce_start, address, time
 ################################################################################
 
 
-def standalone_miner(coinbase_message, address):
+def standalone_miner(coinbase_message, address, serial_port):
+    sp = serial.Serial(serial_port, 9600)
     while True:
         block_template = rpc_getblocktemplate()
 
         print("Mining block template, height {:d}...".format(block_template['height']))
-        mined_block, hash_rate = block_mine(block_template, coinbase_message, 0, address, timeout=60)
-        print("    {:.4f} KH/s\n".format(hash_rate / 1000.0))
+        mined_block, hash_rate = block_mine(block_template, coinbase_message, 0, address, sp, timeout=120)
 
         if mined_block:
             print("Solved a block! Block hash: {}".format(mined_block['hash']))
@@ -475,8 +503,8 @@ def standalone_miner(coinbase_message, address):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: {:s} <coinbase message> <block reward address>".format(sys.argv[0]))
+    if len(sys.argv) < 4:
+        print("Usage: {:s} <coinbase message> <block reward address> <serial port>".format(sys.argv[0]))
         sys.exit(1)
 
-    standalone_miner(sys.argv[1].encode().hex(), sys.argv[2])
+    standalone_miner(sys.argv[1].encode().hex(), sys.argv[2], sys.argv[3])
