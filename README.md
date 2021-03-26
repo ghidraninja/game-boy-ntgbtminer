@@ -1,3 +1,7 @@
+# ntgbtminer - Game Boy edition
+
+This is a version of ntgbtminer that works with the Game Boy bitcoin miner.
+
 # ntgbtminer
 
 ntgbtminer is a no thrills
